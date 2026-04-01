@@ -63,15 +63,19 @@ export default function App() {
   // Check for API key on mount
   useEffect(() => {
     const checkKey = async () => {
+      let selected = false;
       if (window.aistudio) {
-        const selected = await window.aistudio.hasSelectedApiKey();
+        selected = await window.aistudio.hasSelectedApiKey();
+      }
+      
+      const apiKey = (window as any).process?.env?.API_KEY || process.env.API_KEY || process.env.GEMINI_API_KEY;
+      
+      // If we have a key in the environment, we consider it "selected"
+      if (apiKey && apiKey !== "undefined") {
+        setHasKey(true);
+        setCurrentKeyMasked(apiKey.substring(0, 4) + "..." + apiKey.substring(apiKey.length - 4));
+      } else {
         setHasKey(selected);
-        
-        // Update masked key for debugging
-        const apiKey = (window as any).process?.env?.API_KEY || process.env.API_KEY || process.env.GEMINI_API_KEY;
-        if (apiKey) {
-          setCurrentKeyMasked(apiKey.substring(0, 4) + "..." + apiKey.substring(apiKey.length - 4));
-        }
       }
     };
     checkKey();
@@ -290,7 +294,12 @@ export default function App() {
       <main className="w-full max-w-5xl bg-white rounded-[2.5rem] shadow-2xl border-8 border-white overflow-hidden relative">
         <div className="p-6 md:p-10">
           <AnimatePresence mode="wait">
-            {!hasKey ? (
+            {hasKey === null ? (
+              <motion.div key="loading-key" className="text-center py-20">
+                <RefreshCw className="w-12 h-12 text-sky-500 animate-spin mx-auto mb-4" />
+                <p className="text-slate-500">Verificando configuración...</p>
+              </motion.div>
+            ) : hasKey === false ? (
               <motion.div key="auth" className="text-center py-12">
                 <Key className="w-16 h-16 text-amber-400 mx-auto mb-6" />
                 <h2 className="text-2xl font-bold mb-4 text-slate-800">Configuración Necesaria</h2>
