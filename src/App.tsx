@@ -7,6 +7,7 @@ import {
   CloudRain, 
   Rainbow, 
   Play, 
+  Pause,
   AlertCircle, 
   Key,
   Download,
@@ -44,13 +45,63 @@ const LOADING_MESSAGES = [
 interface StoryScene {
   text: string;
   videoUrl?: string;
+  videoUri?: string;
   videoPrompt: string;
+}
+
+// Helper to convert raw PCM to WAV
+function pcmToWav(pcmBase64: string, sampleRate: number = 24000): string {
+  const binaryString = window.atob(pcmBase64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  const buffer = new ArrayBuffer(44 + len);
+  const view = new DataView(buffer);
+
+  // RIFF identifier
+  view.setUint32(0, 0x52494646, false); // "RIFF"
+  // file length
+  view.setUint32(4, 36 + len, true);
+  // RIFF type
+  view.setUint32(8, 0x57415645, false); // "WAVE"
+  // format chunk identifier
+  view.setUint32(12, 0x666d7420, false); // "fmt "
+  // format chunk length
+  view.setUint32(16, 16, true);
+  // sample format (raw PCM)
+  view.setUint16(20, 1, true);
+  // channel count
+  view.setUint16(22, 1, true);
+  // sample rate
+  view.setUint32(24, sampleRate, true);
+  // byte rate (sample rate * block align)
+  view.setUint32(28, sampleRate * 2, true);
+  // block align (channel count * bytes per sample)
+  view.setUint16(32, 2, true);
+  // bits per sample
+  view.setUint16(34, 16, true);
+  // data chunk identifier
+  view.setUint32(36, 0x64617461, false); // "data"
+  // data chunk length
+  view.setUint32(40, len, true);
+
+  // write PCM data
+  for (let i = 0; i < len; i++) {
+    view.setUint8(44 + i, bytes[i]);
+  }
+
+  const blob = new Blob([buffer], { type: 'audio/wav' });
+  return URL.createObjectURL(blob);
 }
 
 export default function App() {
   const [hasKey, setHasKey] = useState<boolean | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationStep, setGenerationStep] = useState<string>("");
+  const [isPlaying, setIsPlaying] = useState(false);
   const [storyScenes, setStoryScenes] = useState<StoryScene[]>([]);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +110,135 @@ export default function App() {
   const [testStatus, setTestStatus] = useState<{ success?: boolean; message?: string } | null>(null);
   const [currentSceneIndex, setCurrentSceneIndex] = useState(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Load state from localStorage on mount
+  useEffect(() => {
+    const savedScenes = localStorage.getItem('storyScenes');
+    const savedAudio = localStorage.getItem('base64Audio');
+    const savedIndex = localStorage.getItem('currentSceneIndex');
+
+    if (savedScenes) {
+      try {
+        const parsedScenes = JSON.parse(savedScenes);
+        if (Array.isArray(parsedScenes) && parsedScenes.length > 0) {
+          // Clear blob URLs as they are invalid after refresh
+          const cleanedScenes = parsedScenes.map((s: any) => ({ ...s, videoUrl: undefined }));
+          setStoryScenes(cleanedScenes);
+          
+          // Re-fetch videos if we have the URIs
+          const reFetchVideos = async () => {
+            const apiKey = (window as any).process?.env?.API_KEY || process.env.API_KEY || process.env.GEMINI_API_KEY;
+            if (!apiKey || apiKey === "undefined") return;
+
+            const updated = [...cleanedScenes];
+            let changed = false;
+            for (let i = 0; i < updated.length; i++) {
+              if (updated[i].videoUri) {
+                try {
+                  const vResp = await fetch(updated[i].videoUri, { headers: { 'x-goog-api-key': apiKey } });
+                  if (vResp.ok) {
+                    const vBlob = await vResp.blob();
+                    updated[i].videoUrl = URL.createObjectURL(vBlob);
+                    changed = true;
+                  }
+                } catch (e) {
+                  console.error(`Failed to re-fetch video ${i+1}:`, e);
+                }
+              }
+            }
+            if (changed) setStoryScenes([...updated]);
+          };
+          reFetchVideos();
+        }
+      } catch (e) {
+        console.error("Error loading saved scenes:", e);
+      }
+    }
+    
+    if (savedAudio) {
+      setAudioUrl(pcmToWav(savedAudio));
+    }
+    
+    if (savedIndex) {
+      setCurrentSceneIndex(parseInt(savedIndex));
+    }
+  }, []);
+
+  // Save state to localStorage when it changes
+  useEffect(() => {
+    if (storyScenes.length > 0) {
+      localStorage.setItem('storyScenes', JSON.stringify(storyScenes));
+    }
+  }, [storyScenes]);
+
+  useEffect(() => {
+    localStorage.setItem('currentSceneIndex', currentSceneIndex.toString());
+  }, [currentSceneIndex]);
+
+  const clearSavedStory = () => {
+    localStorage.removeItem('storyScenes');
+    localStorage.removeItem('base64Audio');
+    localStorage.removeItem('currentSceneIndex');
+    setStoryScenes([]);
+    setAudioUrl(null);
+    setCurrentSceneIndex(0);
+    setError(null);
+  };
+
+  // Cleanup audio URL to avoid memory leaks
+  useEffect(() => {
+    if (audioRef.current && audioUrl) {
+      audioRef.current.load();
+    }
+    return () => {
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+    };
+  }, [audioUrl]);
+
+  // Sync isPlaying state with audio element
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const handlePlay = () => setIsPlaying(true);
+    const handlePause = () => setIsPlaying(false);
+    const handleEnded = () => setIsPlaying(false);
+
+    audio.addEventListener('play', handlePlay);
+    audio.addEventListener('pause', handlePause);
+    audio.addEventListener('ended', handleEnded);
+
+    return () => {
+      audio.removeEventListener('play', handlePlay);
+      audio.removeEventListener('pause', handlePause);
+      audio.removeEventListener('ended', handleEnded);
+    };
+  }, [audioUrl]);
+
+  const togglePlay = () => {
+    if (!audioRef.current) return;
+    
+    if (audioRef.current.paused) {
+      if (audioRef.current.readyState < 2) {
+        console.warn("Audio is still loading...");
+        return;
+      }
+      audioRef.current.play().catch(err => {
+        console.error("Playback failed:", err);
+        setError(`Error de reproducción: ${err.message || "La operación no es compatible con este navegador."}`);
+      });
+    } else {
+      audioRef.current.pause();
+    }
+  };
+
+  const selectScene = (idx: number) => {
+    setCurrentSceneIndex(idx);
+    if (audioRef.current && audioRef.current.duration) {
+      const sceneDuration = audioRef.current.duration / storyScenes.length;
+      audioRef.current.currentTime = idx * sceneDuration;
+    }
+  };
 
   // Check for API key on mount
   useEffect(() => {
@@ -124,6 +304,11 @@ export default function App() {
     setStoryScenes([]);
     setAudioUrl(null);
     setCurrentSceneIndex(0);
+    
+    // Clear previous saved story
+    localStorage.removeItem('storyScenes');
+    localStorage.removeItem('base64Audio');
+    localStorage.removeItem('currentSceneIndex');
 
     try {
       const apiKey = (window as any).process?.env?.API_KEY || process.env.API_KEY || process.env.GEMINI_API_KEY;
@@ -205,11 +390,10 @@ export default function App() {
 
       const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (base64Audio) {
-        const audioBlob = await (await fetch(`data:audio/wav;base64,${base64Audio}`)).blob();
-        setAudioUrl(URL.createObjectURL(audioBlob));
+        localStorage.setItem('base64Audio', base64Audio);
+        setAudioUrl(pcmToWav(base64Audio));
       } else {
         console.warn("No audio data returned from TTS API.");
-        // We can continue without audio, or throw an error. Let's just log it for now.
       }
 
       // STEP 3: Generate Video Clips
@@ -240,6 +424,7 @@ export default function App() {
           }
           const vBlob = await vResp.blob();
           updatedScenes[i].videoUrl = URL.createObjectURL(vBlob);
+          updatedScenes[i].videoUri = videoUri;
           setStoryScenes([...updatedScenes]);
         } else {
           console.warn(`No video URI returned for scene ${i+1}.`);
@@ -248,7 +433,13 @@ export default function App() {
 
     } catch (err: any) {
       console.error("Story generation error:", err);
-      setError(err.message || "Ocurrió un error al generar el cuento.");
+      let userMessage = err.message || "Ocurrió un error al generar el cuento.";
+      
+      if (userMessage.toLowerCase().includes("quota") || userMessage.toLowerCase().includes("limit") || userMessage.includes("429") || userMessage.includes("exceeded")) {
+        userMessage = "¡Vaya! Parece que el Arca está llena por hoy (Cuota de IA excedida). \n\nEsto significa que se han alcanzado los límites gratuitos diarios de Google. Por favor, intenta de nuevo mañana o usa una clave de API diferente si tienes una.";
+      }
+      
+      setError(userMessage);
     } finally {
       setIsGenerating(false);
       setGenerationStep("");
@@ -355,6 +546,8 @@ export default function App() {
                           src={storyScenes[currentSceneIndex].videoUrl} 
                           autoPlay 
                           loop 
+                          muted
+                          playsInline
                           className="w-full h-full object-cover"
                         />
                       ) : (
@@ -381,9 +574,11 @@ export default function App() {
                         <audio 
                           ref={audioRef}
                           src={audioUrl} 
+                          preload="auto"
                           onTimeUpdate={(e) => {
-                            // Simple logic to switch scenes based on audio progress
                             const audio = e.currentTarget;
+                            if (!audio.duration) return;
+                            
                             const progress = audio.currentTime / audio.duration;
                             const newIndex = Math.min(
                               Math.floor(progress * storyScenes.length),
@@ -394,10 +589,10 @@ export default function App() {
                         />
                       )}
                       <button 
-                        onClick={() => audioRef.current?.paused ? audioRef.current.play() : audioRef.current?.pause()}
+                        onClick={togglePlay}
                         className="w-16 h-16 bg-amber-500 hover:bg-amber-600 text-white rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-90"
                       >
-                        <Volume2 className="w-8 h-8" />
+                        {isPlaying ? <Pause className="w-8 h-8" /> : <Play className="w-8 h-8" />}
                       </button>
                       <div className="flex-1">
                         <div className="flex justify-between text-xs font-bold text-sky-700 mb-2 uppercase tracking-wider">
@@ -425,7 +620,7 @@ export default function App() {
                         {storyScenes.map((scene, idx) => (
                           <button
                             key={idx}
-                            onClick={() => setCurrentSceneIndex(idx)}
+                            onClick={() => selectScene(idx)}
                             className={`w-full text-left p-3 rounded-xl transition-all flex items-center gap-3 ${
                               currentSceneIndex === idx 
                                 ? 'bg-white shadow-md border-l-4 border-amber-500 text-amber-900' 
@@ -449,6 +644,13 @@ export default function App() {
                     >
                       <RefreshCw className="w-5 h-5" />
                       Crear Otro Cuento
+                    </button>
+
+                    <button
+                      onClick={clearSavedStory}
+                      className="w-full bg-slate-50 hover:bg-slate-100 text-slate-400 text-sm py-2 rounded-xl flex items-center justify-center gap-2 transition-all"
+                    >
+                      Borrar Cuento Actual
                     </button>
                   </div>
                 </div>
@@ -497,7 +699,22 @@ export default function App() {
                       Error de Generación
                     </div>
                     <p className="text-red-500 text-sm whitespace-pre-wrap text-left">{error}</p>
-                    <button onClick={resetKey} className="text-amber-600 font-bold underline text-sm">Cambiar Clave API</button>
+                    <div className="flex flex-col w-full gap-3">
+                      <button 
+                        onClick={generateFullStory} 
+                        className="w-full bg-sky-500 hover:bg-sky-600 text-white font-bold py-3 px-6 rounded-2xl shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2"
+                      >
+                        <RefreshCw className="w-5 h-5" />
+                        Intentar de Nuevo
+                      </button>
+                      <button 
+                        onClick={resetKey} 
+                        className="w-full bg-amber-500 hover:bg-amber-600 text-white font-bold py-3 px-6 rounded-2xl shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2"
+                      >
+                        <Key className="w-5 h-5" />
+                        Cambiar Clave API
+                      </button>
+                    </div>
                     <div className="flex flex-col items-center gap-2 mt-2">
                       <button onClick={testConnection} className="text-xs text-slate-400 underline">Probar Conexión</button>
                       {testStatus && <p className="text-[10px] text-slate-500">{testStatus.message}</p>}
