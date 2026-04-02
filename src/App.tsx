@@ -291,6 +291,15 @@ export default function App() {
     return () => clearInterval(interval);
   }, [isGenerating]);
 
+  const downloadAsset = (url: string, filename: string) => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
   const handleOpenKeyDialog = async () => {
     if (window.aistudio) {
       await window.aistudio.openSelectKey();
@@ -320,30 +329,43 @@ export default function App() {
 
       // STEP 1: Generate Story Script
       setGenerationStep("Escribiendo el cuento...");
-      const storyResponse = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: "Escribe un cuento infantil sobre el Arca de Noé que dure unos 3 minutos al ser leído (aprox 450 palabras). Divide el cuento en 4 escenas clave. Para cada escena, proporciona: 1) El texto de la narración. 2) Un prompt visual detallado para generar un video de esa escena (estilo dibujos animados amigables).",
-        config: { 
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              scenes: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    text: { type: Type.STRING, description: "El texto de la narración de la escena." },
-                    videoPrompt: { type: Type.STRING, description: "El prompt visual detallado para generar un video de esa escena." }
-                  },
-                  required: ["text", "videoPrompt"]
-                }
+      let storyResponse;
+      let storyAttempts = 0;
+      while (storyAttempts < 2) {
+        try {
+          storyResponse = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: "Escribe un cuento infantil sobre el Arca de Noé que dure unos 3 minutos al ser leído (aprox 450 palabras). Divide el cuento en 4 escenas clave. Para cada escena, proporciona: 1) El texto de la narración. 2) Un prompt visual detallado para generar un video de esa escena (estilo dibujos animados amigables).",
+            config: { 
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  scenes: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        text: { type: Type.STRING, description: "El texto de la narración de la escena." },
+                        videoPrompt: { type: Type.STRING, description: "El prompt visual detallado para generar un video de esa escena." }
+                      },
+                      required: ["text", "videoPrompt"]
+                    }
+                  }
+                },
+                required: ["scenes"]
               }
-            },
-            required: ["scenes"]
-          }
+            }
+          });
+          break;
+        } catch (e) {
+          storyAttempts++;
+          if (storyAttempts >= 2) throw e;
+          await new Promise(r => setTimeout(r, 3000));
         }
-      });
+      }
+
+      if (!storyResponse) throw new Error("No se pudo obtener respuesta de la IA.");
 
       let jsonText = storyResponse.text || "";
       if (!jsonText) {
@@ -374,20 +396,33 @@ export default function App() {
       // STEP 2: Generate Narration Audio (TTS)
       setGenerationStep("Generando la narración de voz...");
       const fullText = scenes.map(s => s.text).join(" ");
-      const ttsResponse = await ai.models.generateContent({
-        model: "gemini-2.5-flash-preview-tts",
-        contents: [{ parts: [{ text: `Lee este cuento para niños con voz cálida y pausada: ${fullText}` }] }],
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {
-              // 'Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'
-              prebuiltVoiceConfig: { voiceName: 'Kore' },
+      let ttsResponse;
+      let ttsAttempts = 0;
+      while (ttsAttempts < 2) {
+        try {
+          ttsResponse = await ai.models.generateContent({
+            model: "gemini-2.5-flash-preview-tts",
+            contents: [{ parts: [{ text: `Lee este cuento para niños con voz cálida y pausada: ${fullText}` }] }],
+            config: {
+              responseModalities: [Modality.AUDIO],
+              speechConfig: {
+                voiceConfig: {
+                  // 'Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'
+                  prebuiltVoiceConfig: { voiceName: 'Kore' },
+                },
+              },
             },
-          },
-        },
-      });
+          });
+          break;
+        } catch (e) {
+          ttsAttempts++;
+          if (ttsAttempts >= 2) throw e;
+          await new Promise(r => setTimeout(r, 3000));
+        }
+      }
 
+      if (!ttsResponse) throw new Error("No se pudo generar la narración.");
+      
       const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (base64Audio) {
         localStorage.setItem('base64Audio', base64Audio);
@@ -400,15 +435,29 @@ export default function App() {
       const updatedScenes = [...scenes];
       for (let i = 0; i < Math.min(scenes.length, 3); i++) {
         setGenerationStep(`Generando video para la escena ${i + 1}...`);
-        let operation = await ai.models.generateVideos({
-          model: 'veo-3.1-lite-generate-preview',
-          prompt: scenes[i].videoPrompt,
-          config: {
-            numberOfVideos: 1,
-            resolution: '720p',
-            aspectRatio: '16:9'
+        
+        let operation;
+        let videoAttempts = 0;
+        while (videoAttempts < 2) {
+          try {
+            operation = await ai.models.generateVideos({
+              model: 'veo-3.1-lite-generate-preview',
+              prompt: scenes[i].videoPrompt,
+              config: {
+                numberOfVideos: 1,
+                resolution: '720p',
+                aspectRatio: '16:9'
+              }
+            });
+            break;
+          } catch (e) {
+            videoAttempts++;
+            if (videoAttempts >= 2) throw e;
+            await new Promise(r => setTimeout(r, 5000));
           }
-        });
+        }
+
+        if (!operation) continue;
 
         while (!operation.done) {
           await new Promise(resolve => setTimeout(resolve, 10000));
@@ -434,6 +483,22 @@ export default function App() {
     } catch (err: any) {
       console.error("Story generation error:", err);
       let userMessage = err.message || "Ocurrió un error al generar el cuento.";
+      
+      // Try to parse JSON error if it looks like one
+      if (userMessage.trim().startsWith('{') && userMessage.trim().endsWith('}')) {
+        try {
+          const parsed = JSON.parse(userMessage);
+          if (parsed.error) {
+            if (parsed.error.code === 500 || parsed.error.status === "Internal Server Error") {
+              userMessage = "¡Oh no! Los servidores de la IA están un poco mareados (Error 500). \n\nEsto suele ser un problema temporal. Por favor, espera unos segundos e intenta darle a 'Intentar de Nuevo'.";
+            } else if (parsed.error.message) {
+              userMessage = parsed.error.message;
+            }
+          }
+        } catch (e) {
+          // Not valid JSON or different structure, keep original message
+        }
+      }
       
       if (userMessage.toLowerCase().includes("quota") || userMessage.toLowerCase().includes("limit") || userMessage.includes("429") || userMessage.includes("exceeded")) {
         userMessage = "¡Vaya! Parece que el Arca está llena por hoy (Cuota de IA excedida). \n\nEsto significa que se han alcanzado los límites gratuitos diarios de Google. Por favor, intenta de nuevo mañana o usa una clave de API diferente si tienes una.";
@@ -635,6 +700,56 @@ export default function App() {
                             <span className="text-sm font-medium line-clamp-1">{scene.text}</span>
                           </button>
                         ))}
+                      </div>
+                    </div>
+
+                    <div className="bg-sky-50 p-6 rounded-3xl border-2 border-sky-100">
+                      <h3 className="text-xl font-bold text-sky-800 mb-4 flex items-center gap-2">
+                        <Download className="w-5 h-5" />
+                        Descargar
+                      </h3>
+                      <div className="flex flex-col gap-3">
+                        <button
+                          onClick={() => {
+                            const scene = storyScenes[currentSceneIndex];
+                            if (scene.videoUrl) {
+                              downloadAsset(scene.videoUrl, `escena-${currentSceneIndex + 1}.mp4`);
+                            }
+                          }}
+                          disabled={!storyScenes[currentSceneIndex]?.videoUrl}
+                          className="w-full bg-white hover:bg-sky-100 text-sky-700 font-bold py-3 rounded-2xl flex items-center justify-center gap-2 transition-all shadow-sm border border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <Ship className="w-4 h-4" />
+                          Video Escena {currentSceneIndex + 1}
+                        </button>
+                        
+                        <button
+                          onClick={() => {
+                            if (audioUrl) {
+                              downloadAsset(audioUrl, 'cuento-narrado.wav');
+                            }
+                          }}
+                          disabled={!audioUrl}
+                          className="w-full bg-white hover:bg-sky-100 text-sky-700 font-bold py-3 rounded-2xl flex items-center justify-center gap-2 transition-all shadow-sm border border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <Volume2 className="w-4 h-4" />
+                          Narración Completa
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            const fullText = storyScenes.map((s, i) => `ESCENA ${i + 1}\n${s.text}`).join('\n\n');
+                            const blob = new Blob([fullText], { type: 'text/plain' });
+                            const url = URL.createObjectURL(blob);
+                            downloadAsset(url, 'cuento-script.txt');
+                            URL.revokeObjectURL(url);
+                          }}
+                          disabled={storyScenes.length === 0}
+                          className="w-full bg-white hover:bg-sky-100 text-sky-700 font-bold py-3 rounded-2xl flex items-center justify-center gap-2 transition-all shadow-sm border border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <BookOpen className="w-4 h-4" />
+                          Guion del Cuento
+                        </button>
                       </div>
                     </div>
 
